@@ -1,0 +1,693 @@
+--- /dev/null
++++ b/artifacts/api-server/backend/crates.py
+@@ -0,0 +1,92 @@
++"""Explicit crate registration and whole-crate location transfers.
++These events never change product stock or enter reconciliation movements.
++"""
++import re
++import uuid
++
++def init(db):
++    db.executescript("""
++    CREATE TABLE IF NOT EXISTS tracked_crates(
++      id TEXT PRIMARY KEY, tag TEXT UNIQUE NOT NULL, product_id TEXT NOT NULL REFERENCES products(id),
++      declared_quantity INTEGER NOT NULL CHECK(declared_quantity>=0), location TEXT NOT NULL,
++      revision INTEGER NOT NULL DEFAULT 1, registered_at TEXT NOT NULL);
++    CREATE TABLE IF NOT EXISTS crate_events(
++      id INTEGER PRIMARY KEY, crate_id TEXT NOT NULL REFERENCES tracked_crates(id),
++      action TEXT NOT NULL, from_location TEXT, to_location TEXT NOT NULL,
++      actor TEXT NOT NULL, at TEXT NOT NULL, note TEXT NOT NULL,
++      request_id TEXT UNIQUE NOT NULL, request_body TEXT NOT NULL);
++    CREATE TABLE IF NOT EXISTS crate_scans(
++      id INTEGER PRIMARY KEY, tag TEXT NOT NULL, crate_id TEXT REFERENCES tracked_crates(id),
++      source TEXT NOT NULL CHECK(source IN ('simulated','entered_id')),
++      station TEXT NOT NULL, recorded_location TEXT, crate_revision INTEGER,
++      actor TEXT NOT NULL, at TEXT NOT NULL, request_id TEXT UNIQUE NOT NULL, request_body TEXT NOT NULL);
++    CREATE INDEX IF NOT EXISTS crate_scans_crate ON crate_scans(crate_id,id);
++    """)
++
++def tag_id(value, s):
++    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9:_-]{4,80}', value.strip()):
++        raise s.APIError('Tag ID must contain 4–80 letters, numbers, colons, underscores or hyphens.')
++    return value.strip().upper()
++
++def location(value, s):
++    value = s.text(value, 'Location')
++    if len(value) > 80: raise s.APIError('Location cannot exceed 80 characters.')
++    return value
++
++def snapshot(db):
++    result=[]
++    for row in db.execute('SELECT c.*,p.name AS product_name FROM tracked_crates c JOIN products p ON p.id=c.product_id ORDER BY c.registered_at DESC,c.id'):
++        item=dict(row)
++        item['events']=[{k:r[k] for k in ('id','action','from_location','to_location','actor','at','note')} for r in db.execute('SELECT * FROM crate_events WHERE crate_id=? ORDER BY id DESC',(row['id'],))]
++        scan=db.execute('SELECT id,source,station,recorded_location,crate_revision,actor,at FROM crate_scans WHERE crate_id=? ORDER BY id DESC LIMIT 1',(row['id'],)).fetchone()
++        item['last_scan']=dict(scan) if scan else None
++        item['location_review']=bool(scan and scan['crate_revision']==row['revision'] and scan['station'].casefold()!=scan['recorded_location'].casefold())
++        result.append(item)
++    scans=[dict(row) for row in db.execute('SELECT id,tag,crate_id,source,station,recorded_location,crate_revision,actor,at FROM crate_scans ORDER BY id DESC LIMIT 100')]
++    return {'crates':result,'scans':scans}
++
++def route(db,user,method,b,s):
++    if method=='GET': return snapshot(db)
++    s.require(user,('staff','manager'))
++    action=b.get('action')
++    if action not in ('register','transfer','scan'): raise s.APIError('Choose register, transfer or scan.')
++    request_id=b.get('requestId')
++    if not isinstance(request_id,str) or not re.fullmatch(r'[A-Za-z0-9-]{16,80}',request_id): raise s.APIError('A valid request ID is required.')
++    canonical=s.dump(b)
++    old=db.execute('SELECT request_body FROM crate_events WHERE request_id=? UNION ALL SELECT request_body FROM crate_scans WHERE request_id=?',(request_id,request_id)).fetchone()
++    if old:
++        if old['request_body']!=canonical: raise s.APIError('Request ID already used for different data.',409)
++        return snapshot(db)
++    tag=tag_id(b.get('tag'),s)
++    if action=='scan':
++        source=b.get('source')
++        if source not in ('simulated','entered_id'): raise s.APIError('Choose simulated or entered_id input. Physical RFID verification is not available.')
++        station=location(b.get('station'),s)
++        crate=db.execute('SELECT * FROM tracked_crates WHERE tag=?',(tag,)).fetchone()
++        db.execute('INSERT INTO crate_scans(tag,crate_id,source,station,recorded_location,crate_revision,actor,at,request_id,request_body) VALUES(?,?,?,?,?,?,?,?,?,?)',
++          (tag,crate['id'] if crate else None,source,station,crate['location'] if crate else None,crate['revision'] if crate else None,user['name'],s.now(),request_id,canonical))
++        s.audit(db,user,'crate_scan',None,{'tag':tag,'source':source,'station':station,'known':bool(crate)})
++        return snapshot(db)
++    destination=location(b.get('location'),s)
++    note=b.get('note','')
++    if not isinstance(note,str) or len(note)>1000: raise s.APIError('Note must be at most 1000 characters.')
++    at=s.now()
++    if action=='register':
++        pid=b.get('productId')
++        if not isinstance(pid,str) or not db.execute('SELECT 1 FROM products WHERE id=?',(pid,)).fetchone(): raise s.APIError('Select an existing product.')
++        quantity=s.integer(b.get('quantity'),'Declared quantity')
++        if db.execute('SELECT 1 FROM tracked_crates WHERE tag=?',(tag,)).fetchone(): raise s.APIError('This tag is already registered.',409)
++        cid='CR-'+uuid.uuid4().hex[:12].upper()
++        db.execute('INSERT INTO tracked_crates(id,tag,product_id,declared_quantity,location,registered_at) VALUES(?,?,?,?,?,?)',(cid,tag,pid,quantity,destination,at))
++        source=None
++    else:
++        crate=db.execute('SELECT * FROM tracked_crates WHERE tag=?',(tag,)).fetchone()
++        if not crate: raise s.APIError('Tag not registered.',404)
++        revision=s.integer(b.get('revision'),'Revision',1)
++        if revision!=crate['revision']: raise s.APIError('Crate changed. Refresh and review its latest location.',409)
++        source=crate['location'];cid=crate['id']
++        if source.casefold()==destination.casefold(): raise s.APIError('Choose a different destination.')
++        db.execute('UPDATE tracked_crates SET location=?,revision=revision+1 WHERE id=?',(destination,cid))
++    db.execute('INSERT INTO crate_events(crate_id,action,from_location,to_location,actor,at,note,request_id,request_body) VALUES(?,?,?,?,?,?,?,?,?)',(cid,action,source,destination,user['name'],at,note.strip(),request_id,canonical))
++    s.audit(db,user,'crate_'+action,None,{'crateId':cid,'tag':tag,'from':source,'to':destination})
++    return snapshot(db)
+--- /dev/null
++++ b/artifacts/api-server/backend/test_crates.py
+@@ -0,0 +1,97 @@
++import tempfile
++import unittest
++from pathlib import Path
++import crates
++import server as s
++
++class CrateTests(unittest.TestCase):
++    def setUp(self):
++        self.temp=tempfile.TemporaryDirectory(); self.old=s.DB; s.DB=str(Path(self.temp.name)/'crates.db'); s.init()
++        with s.connect() as db: db.execute("INSERT INTO products(id,name,recorded) VALUES('P1','Bottles',12)")
++    def tearDown(self): s.DB=self.old; self.temp.cleanup()
++    def call(self,body=None,role='staff'):
++        with s.connect() as db:
++            db.execute('BEGIN IMMEDIATE')
++            return crates.route(db,s.USERS[role],'GET' if body is None else 'POST',body or {},s)
++    def register(self,**changes):
++        body={'action':'register','tag':'demo-001','productId':'P1','quantity':12,'location':'Stockroom','requestId':'register-request-0001'};body.update(changes);return body
++    def transfer(self,**changes):
++        body={'action':'transfer','tag':'DEMO-001','revision':1,'location':'Shelf','requestId':'transfer-request-0001'};body.update(changes);return body
++    def test_register_transfer_history_does_not_change_stock(self):
++        self.call(self.register()); result=self.call(self.transfer())['crates'][0]
++        self.assertEqual(result['location'],'Shelf');self.assertEqual(result['revision'],2)
++        self.assertEqual(result['events'][0]['from_location'],'Stockroom')
++        self.assertEqual(result['events'][0]['actor'],'Staff A');self.assertEqual(len(result['events']),2)
++        with s.connect() as db:
++            self.assertEqual(db.execute('SELECT recorded FROM products').fetchone()[0],12)
++            self.assertEqual(db.execute('SELECT COUNT(*) FROM movements').fetchone()[0],0)
++            self.assertEqual(db.execute('SELECT COUNT(*) FROM counts').fetchone()[0],0)
++    def test_retry_idempotent_and_conflicting_reuse_rejected(self):
++        body=self.register();self.call(body);self.call(body)
++        self.call(self.transfer());self.call(self.transfer())
++        self.assertEqual(len(self.call()['crates'][0]['events']),2)
++        with self.assertRaises(s.APIError) as error:self.call(self.transfer(location='Other'))
++        self.assertEqual(error.exception.status,409)
++    def test_stale_revision_and_same_location_rejected(self):
++        self.call(self.register());self.call(self.transfer())
++        for body in (self.transfer(requestId='transfer-request-0002'),self.transfer(revision=2,requestId='transfer-request-0003')):
++            with self.assertRaises(s.APIError):self.call(body)
++        self.assertEqual(len(self.call()['crates'][0]['events']),2)
++    def test_owner_read_only_and_duplicate_tag_rejected(self):
++        with self.assertRaises(s.APIError) as error:self.call(self.register(),role='owner')
++        self.assertEqual(error.exception.status,403)
++        self.call(self.register(),role='manager')
++        self.assertEqual(len(self.call(role='owner')['crates']),1)
++        with self.assertRaises(s.APIError):self.call(self.register(requestId='register-request-0002'))
++    def test_invalid_fields_leave_no_partial_registration(self):
++        for change in ({'quantity':True},{'quantity':-1},{'tag':'bad tag'},{'productId':'missing'},{'location':''},{'requestId':'bad'}):
++            with self.assertRaises(s.APIError):self.call(self.register(**change))
++        self.assertEqual(self.call()['crates'],[])
++    def test_init_is_repeatable_and_data_persists(self):
++        self.call(self.register());s.init();self.assertEqual(self.call()['crates'][0]['tag'],'DEMO-001')
++    def scan(self,**changes):
++        body={'action':'scan','tag':'DEMO-001','source':'simulated','station':'Stockroom','requestId':'scan-request-0000001'};body.update(changes);return body
++    def test_scan_opens_known_crate_and_preserves_inventory(self):
++        self.call(self.register()); state=self.call(self.scan())
++        self.assertEqual(state['crates'][0]['last_scan']['source'],'simulated')
++        self.assertFalse(state['crates'][0]['location_review'])
++        self.assertEqual(state['scans'][0]['recorded_location'],'Stockroom')
++        self.assertEqual(len(state['crates'][0]['events']),1)
++        with s.connect() as db:
++            self.assertEqual(db.execute('SELECT recorded FROM products').fetchone()[0],12)
++            for table in ('movements','counts','ledger'): self.assertEqual(db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],0)
++    def test_mismatched_reader_location_only_flags_review(self):
++        self.call(self.register());state=self.call(self.scan(station='Shelf'))
++        self.assertTrue(state['crates'][0]['location_review'])
++        self.assertEqual(state['crates'][0]['location'],'Stockroom')
++        self.assertEqual(state['crates'][0]['revision'],1)
++        state=self.call(self.transfer())
++        self.assertFalse(state['crates'][0]['location_review'])
++        self.assertEqual(state['scans'][0]['recorded_location'],'Stockroom')
++    def test_unknown_scan_does_not_create_crate_or_product(self):
++        state=self.call(self.scan());self.assertEqual(state['crates'],[])
++        self.assertIsNone(state['scans'][0]['crate_id'])
++        self.assertIsNone(state['scans'][0]['recorded_location'])
++        with s.connect() as db:self.assertEqual(db.execute('SELECT COUNT(*) FROM products').fetchone()[0],1)
++    def test_scan_retry_and_cross_action_request_reuse(self):
++        self.call(self.register()); self.call(self.scan());self.call(self.scan())
++        self.assertEqual(len(self.call()['scans']),1)
++        with self.assertRaises(s.APIError):self.call(self.scan(station='Shelf'))
++        with self.assertRaises(s.APIError):self.call(self.transfer(requestId='scan-request-0000001'))
++        with self.assertRaises(s.APIError):self.call(self.scan(requestId='register-request-0001'))
++    def test_scan_source_validation_and_permissions(self):
++        for change in ({'source':'rfid_verified'},{'source':None},{'station':''},{'station':'x'*81}):
++            with self.assertRaises(s.APIError):self.call(self.scan(**change))
++        with self.assertRaises(s.APIError) as error:self.call(self.scan(),role='owner')
++        self.assertEqual(error.exception.status,403)
++        self.assertEqual(self.call()['scans'],[])
++    def test_id_entry_and_scans_persist_across_init(self):
++        self.call(self.register());self.call(self.scan(source='entered_id'));s.init()
++        state=self.call(role='owner');self.assertEqual(state['scans'][0]['source'],'entered_id')
++        self.assertEqual(state['scans'][0]['actor'],'Staff A')
++    def test_get_does_not_mutate_and_latest_scan_controls_review(self):
++        self.call(self.register());self.call(self.scan(station='Shelf'))
++        self.assertTrue(self.call()['crates'][0]['location_review'])
++        state=self.call(self.scan(requestId='scan-request-0000002',station='stockroom'))
++        self.assertFalse(state['crates'][0]['location_review'])
++        self.assertEqual(len(self.call()['scans']),2)
+--- a/artifacts/api-server/backend/test_http.py
++++ b/artifacts/api-server/backend/test_http.py
+@@ -118,4 +118,22 @@
+             self.call('products',{'name':'Owner product','recorded':1})
+         self.assertEqual(forbidden.exception.code,403)
+ 
++    def test_crate_scan_http_session_permissions_and_persistence(self):
++        with self.assertRaises(urllib.error.HTTPError) as error:self.call('crates')
++        self.assertEqual(error.exception.code,401)
++        self.call('session',{'role':'manager'})
++        self.call('imports',{'kind':'products','rows':[{'id':'CR-P','name':'Crate Product','recorded':12}]})
++        self.call('crates',{'action':'register','tag':'HTTP-TAG-001','productId':'CR-P','quantity':12,'location':'Stockroom','requestId':'http-register-000001'})
++        self.call('session',{'role':'staff'})
++        body={'action':'scan','tag':'HTTP-TAG-001','source':'simulated','station':'Rack A','requestId':'http-scan-000000001'}
++        self.call('crates',body);state=self.call('crates',body)
++        self.assertEqual(len(state['scans']),1)
++        self.assertTrue(state['crates'][0]['location_review'])
++        self.assertEqual(state['crates'][0]['location'],'Stockroom')
++        self.assertEqual(self.call('state')['products'][0]['recorded'],12)
++        self.call('session',{'role':'owner'})
++        self.assertEqual(len(self.call('crates')['scans']),1)
++        with self.assertRaises(urllib.error.HTTPError) as error:self.call('crates',body)
++        self.assertEqual(error.exception.code,403)
++
+ if __name__=='__main__':unittest.main()
+--- a/artifacts/api-server/backend/server.py
++++ b/artifacts/api-server/backend/server.py
+@@ -10,6 +10,7 @@
+ import sqlite3
+ import sys
+ import attachments
++import crates
+ import reports
+ from reporting import service as summary_reports
+ from datetime import datetime, timezone
+@@ -42,6 +43,7 @@
+         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at TEXT NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,case_id TEXT,detail TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,case_id TEXT UNIQUE NOT NULL,product_id TEXT NOT NULL,before_qty INTEGER NOT NULL,after_qty INTEGER NOT NULL,detail TEXT NOT NULL);
+         ''')
++        crates.init(db)
+         attachments.init(db)
+         reports.init(db)
+         product_columns = {row['name'] for row in db.execute('PRAGMA table_info(products)')}
+@@ -270,6 +272,7 @@
+                     bridge=os.environ.get('VERACITY_EVIDENCE_BRIDGE','')
+                     if not bridge or not secrets.compare_digest(self.headers.get('X-Evidence-Bridge',''),bridge): raise APIError('Private evidence endpoint.',403)
+                     result=attachments.route(db,user,path,self.command,b,sys.modules[__name__])
++                elif path==['crates']: result=crates.route(db,user,self.command,b,sys.modules[__name__])
+                 elif self.command=='GET' and path==['state']: result=state(db,user)
+                 elif reporting:
+                     from urllib.parse import parse_qs, urlsplit
+--- a/artifacts/veracity/src/App.tsx
++++ b/artifacts/veracity/src/App.tsx
+@@ -6,6 +6,7 @@
+ import { AppShell } from '@/components/app/app-shell'
+ import { Toaster } from '@/components/ui/sonner'
+ import { CaseDetailView } from '@/components/screens/case-detail-view'
++import { CratesView } from '@/components/screens/crates-view'
+ import { CountView } from '@/components/screens/count-view'
+ import { HistoryView } from '@/components/screens/history-view'
+ import { InboxFramesView } from '@/components/screens/inbox-frames-view'
+@@ -59,6 +60,7 @@
+         <Route path="/decisions"><Titled title="Decision overview · Veracity"><OwnerDecisionsView /></Titled></Route>
+         <Route path="/inbox"><Titled title="Inbox · Veracity"><InboxView /></Titled></Route>
+         <Route path="/inbox/frames"><Titled title="Inbox frames · Veracity"><InboxFramesView /></Titled></Route>
++        <Route path="/crates"><Titled title="Crate tracking · Veracity"><CratesView /></Titled></Route>
+         <Route path="/count"><Titled title="New count · Veracity"><CountView /></Titled></Route>
+         <Route path="/account"><RoleLanding /></Route>
+         <Route path="/cases/:id" component={CasePage} />
+--- a/artifacts/veracity/src/components/app/app-shell.tsx
++++ b/artifacts/veracity/src/components/app/app-shell.tsx
+@@ -11,6 +11,7 @@
+ const NAV: { href: string; label: string; icon: typeof Inbox; roles?: Role[] }[] = [
+   { href: '/work', label: 'My work', icon: ListChecks, roles: ['staff'] },
+   { href: '/count', label: 'Count', icon: ClipboardList, roles: ['staff', 'manager'] },
++  { href: '/crates', label: 'Crates', icon: ClipboardList },
+   { href: '/inbox', label: 'Inbox', icon: Inbox },
+   { href: '/history', label: 'History', icon: History },
+   { href: '/decisions', label: 'Decisions', icon: BookOpenCheck, roles: ['owner'] },
+@@ -91,7 +92,7 @@
+ 
+       <nav
+         aria-label="Main"
+-        className="fixed inset-x-0 bottom-0 z-40 flex border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] md:hidden"
++        className="fixed inset-x-0 bottom-0 z-40 flex overflow-x-auto border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] md:hidden"
+       >
+         {nav.map((item) => {
+           const active = isActive(item.href)
+@@ -101,7 +102,7 @@
+               href={item.href}
+               aria-current={active ? 'page' : undefined}
+               className={cn(
+-                'relative flex h-16 flex-1 flex-col items-center justify-center gap-1 text-caption font-medium',
++                'relative flex h-16 min-w-16 flex-1 flex-col items-center justify-center gap-1 text-caption font-medium',
+                 active ? 'text-accent-text' : 'text-fg-secondary',
+               )}
+             >
+--- /dev/null
++++ b/artifacts/veracity/src/components/screens/crates-view.tsx
+@@ -0,0 +1,160 @@
++import { useEffect, useRef, useState, type FormEvent } from 'react'
++import { Link, useSearch } from 'wouter'
++import { AlertTriangle, ArrowRight, Box, CheckCircle2, MapPin, Radio, RefreshCw, ScanLine } from 'lucide-react'
++import { useApp, useUnsavedWork } from '@/components/app/app-provider'
++import { Button } from '@/components/ui/button'
++import { Input } from '@/components/ui/input'
++import { Card, PageHeader } from '@/components/veracity/primitives'
++import { getCrates, requestId, type CrateState, type TrackedCrate } from '@/lib/crates'
++import { formatDateTime } from '@/lib/format'
++import { cn } from '@/lib/utils'
++
++const field = 'min-w-0 w-full h-12 rounded-xl border border-line bg-elevated px-3 text-white'
++export function CratesView() {
++  const { products, role } = useApp()
++  const search = useSearch()
++  const [data, setData] = useState<CrateState>({ crates: [], scans: [] })
++  const [ready, setReady] = useState(false)
++  const [busy, setBusy] = useState(false)
++  const [error, setError] = useState('')
++  const [message, setMessage] = useState('')
++  const [selectedTag, setSelectedTag] = useState('')
++  const [readerTag, setReaderTag] = useState('')
++  const [scan, setScan] = useState('')
++  const [station, setStation] = useState('Stockroom')
++  const [tag, setTag] = useState('')
++  const [productId, setProductId] = useState('')
++  const [quantity, setQuantity] = useState('')
++  const [initialLocation, setInitialLocation] = useState('Stockroom')
++  const [destination, setDestination] = useState('')
++  const [note, setNote] = useState('')
++  const [filter, setFilter] = useState('')
++  const [activeView, setActiveView] = useState<'locations' | 'crates' | 'activity'>('locations')
++  const [registerOpen, setRegisterOpen] = useState(false)
++  const [unknown, setUnknown] = useState('')
++  const [lastInput, setLastInput] = useState<'simulated' | 'entered_id' | null>(null)
++  const pending = useRef<{ payload: string; requestId: string } | null>(null)
++  const gate = useRef(false)
++  const mounted = useRef(true)
++  const detail = useRef<HTMLDivElement>(null)
++  const registerPanel = useRef<HTMLDivElement>(null)
++  const selected = data.crates.find(c => c.tag === selectedTag)
++  const write = role === 'staff' || role === 'manager'
++  useUnsavedWork(busy || Boolean(destination || note) || (registerOpen && Boolean(tag || productId || quantity)))
++  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
++  async function refresh(signal?: AbortSignal) {
++    const state = await getCrates(signal)
++    if (!signal?.aborted && mounted.current) { setData(state); setReady(true) }
++  }
++  useEffect(() => {
++    const controller = new AbortController()
++    setReady(false); setError(''); setData({ crates: [], scans: [] }); pending.current = null
++    void refresh(controller.signal).catch(e => { if (!controller.signal.aborted) setError(e.message) })
++    return () => controller.abort()
++  }, [role])
++  useEffect(() => {
++    const value = new URLSearchParams(search).get('tag')?.trim().toUpperCase()
++    if (value) { setScan(value); setSelectedTag(value); setTag(value) }
++  }, [search])
++  function openCrate(crate: TrackedCrate, scroll = true) {
++    setSelectedTag(crate.tag); setScan(crate.tag); setDestination(''); setNote(''); setUnknown(''); setError('')
++    if (scroll) requestAnimationFrame(() => { detail.current?.scrollIntoView({ behavior: 'auto', block: 'start' }); detail.current?.focus({ preventScroll: true }) })
++  }
++  async function mutate(body: Record<string, unknown>): Promise<boolean> {
++    if (gate.current || !write) return false
++    gate.current = true; setBusy(true); setError(''); setMessage('')
++    const payload = JSON.stringify(body)
++    if (!pending.current || pending.current.payload !== payload) pending.current = { payload, requestId: requestId() }
++    try {
++      const response = await fetch('/api/backend/crates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, requestId: pending.current.requestId }) })
++      const state = await response.json()
++      if (!response.ok) throw new Error(state.error || 'Could not save. Retry the same action if the connection was interrupted.')
++      pending.current = null
++      if (!mounted.current) return true
++      setData(state); setReady(true)
++      const value = String(body.tag).trim().toUpperCase()
++      if (body.action === 'scan') {
++        setLastInput(body.source as 'simulated' | 'entered_id')
++        const found = state.crates.find((c: TrackedCrate) => c.tag === value)
++        if (found) { openCrate(found); setMessage('Tag identified. Crate details retrieved; no transfer or stock correction was made.') }
++        else { setSelectedTag(''); setUnknown(value); setTag(value); setMessage('Unknown tag detected. No stock was created or changed.') }
++      } else {
++        setSelectedTag(value); setUnknown(''); setDestination(''); setNote('')
++        setMessage(body.action === 'register' ? 'Crate registered. Scan its demo tag to retrieve the record.' : 'Transfer recorded. The location history is updated; shop stock totals are unchanged.')
++        if (body.action === 'register') { setRegisterOpen(false); setTag(''); setProductId(''); setQuantity(''); setReaderTag(value); setScan(value) }
++      }
++      return true
++    } catch (e) { if (mounted.current) setError((e as Error).message); return false }
++    finally { gate.current = false; if (mounted.current) setBusy(false) }
++  }
++  function readTag(value: string, source: 'simulated' | 'entered_id') {
++    if (!value.trim() || !station.trim()) { setError('Select a tag and enter a reader location first.'); return }
++    void mutate({ action: 'scan', tag: value, source, station })
++  }
++  const visible = data.crates.filter(c => `${c.product_name} ${c.tag} ${c.location}`.toLowerCase().includes(filter.trim().toLowerCase()))
++  const locations = Array.from(new Set(data.crates.map(c => c.location.trim()))).sort()
++  const reviews = data.crates.filter(c => c.location_review).length
++  const candidate = readerTag || data.crates[0]?.tag || ''
++  return <div className="flex flex-col gap-6" data-testid="page-crates">
++    <PageHeader title="Crate tracking" subtitle="Find the crate. Follow its journey. Check the stock.">
++      <Button type="button" disabled={!write || busy} onClick={() => { setRegisterOpen(v => !v); requestAnimationFrame(() => registerPanel.current?.scrollIntoView({ block: 'start' })) }}><Box className="size-4" />Register crate</Button>
++    </PageHeader>
++    <section className="relative overflow-hidden rounded-2xl border border-accent-fill/30 bg-gradient-to-br from-accent-fill/15 via-surface to-surface p-5 md:p-7">
++      <div className="flex flex-wrap items-center gap-2 text-caption font-semibold uppercase tracking-wider"><span className="flex items-center gap-2 rounded-full border border-accent-fill/40 bg-accent-fill/15 px-3 py-1"><Radio className="size-3.5" />RFID workflow demo</span><span className="rounded-full border border-line px-3 py-1 text-fg-secondary">Simulated input · no hardware connected</span></div>
++      <h2 className="mt-4 max-w-2xl text-h1 font-semibold tracking-tight">Know which crate.<br />Know its last recorded place.</h2>
++      <p className="mt-3 max-w-2xl text-body-sm text-fg-secondary">One identifier per crate connects its product, recorded location and transfer history. Use the demo reader below to see the workflow on your phone or tablet.</p>
++      <div className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-4">{[
++        ['Registered crates', data.crates.length], ['Recorded locations', locations.length], ['Crates with a scan', data.crates.filter(c => c.last_scan).length], ['Location checks', reviews],
++      ].map(([label, value]) => <div key={label} className="rounded-xl border border-line bg-canvas/50 p-3"><p className="text-caption text-fg-secondary">{label}</p><p className="num mt-1 text-h1 font-semibold">{ready ? value : '—'}</p></div>)}</div>
++    </section>
++    {error && <div role="alert" className="rounded-xl border border-danger/40 bg-danger/10 p-4 text-body-sm text-danger">{error}<Button type="button" variant="ghost" disabled={busy} onClick={() => { void refresh().then(() => setError('')).catch(e => setError(e.message)) }}><RefreshCw className="size-4" />Refresh records</Button></div>}
++    {message && <p role="status" className="rounded-xl border border-line bg-elevated p-4 text-body-sm">{message}</p>}
++    {!write && <p className="text-body-sm text-fg-secondary">Owner view: review crate records and history. Staff and Managers register crates, record scans and confirm transfers.</p>}
++    <Card className="p-5 md:p-6">
++      <div className="mb-4 flex items-start gap-3"><span className="rounded-xl bg-accent-fill/15 p-3 text-accent-text"><ScanLine /></span><div><h2 className="text-h2 font-semibold">Demo RFID reader</h2><p className="text-body-sm text-fg-secondary">Choose a registered tag and simulate one read. The application retrieves its crate record.</p></div></div>
++      <div className="grid items-end gap-3 md:grid-cols-[1fr_1fr_auto]">
++        <label className="flex min-w-0 flex-col gap-2 text-body-sm">Demo tag<select aria-label="Demo tag" value={candidate} onChange={e => setReaderTag(e.target.value)} className={field} disabled={!write || busy || !ready}><option value="">Register a crate first</option>{data.crates.map(c => <option key={c.id} value={c.tag}>{c.tag} · {c.product_name}</option>)}<option value="DEMO-UNKNOWN-TAG">Unknown tag (demo)</option></select></label>
++        <label className="flex flex-col gap-2 text-body-sm">Reader location (simulated)<Input aria-label="Reader location" value={station} onChange={e => setStation(e.target.value)} maxLength={80} className={field} disabled={!write || busy} /></label>
++        <Button type="button" className="h-12" disabled={!write || busy || !ready || !candidate || !station.trim()} onClick={() => readTag(candidate, 'simulated')}><Radio className={cn('size-4', busy && 'animate-pulse')} />{busy ? 'Processing…' : 'Simulate RFID scan'}</Button>
++      </div>
++      <details className="mt-4 rounded-xl border border-line p-3"><summary className="cursor-pointer text-body-sm font-medium">Enter an ID / compatible keyboard reader</summary><p className="mt-3 text-caption text-fg-secondary">Focus this field and scan with a configured keyboard-output reader, or type an ID. This records “Entered ID”; it does not verify that physical RFID hardware supplied it.</p><form className="mt-3 flex flex-wrap gap-3" onSubmit={e => { e.preventDefault(); readTag(scan, 'entered_id') }}><Input aria-label="Scan tag ID" placeholder="DEMO-CRATE-001" value={scan} onChange={e => setScan(e.target.value)} maxLength={80} disabled={!write || busy} className={cn(field, 'min-w-0 flex-1')} /><Button type="submit" disabled={!ready || !write || busy || !scan.trim()}>Read tag ID</Button></form></details>
++      {unknown && <div role="status" className="mt-4 rounded-xl border border-warning/40 bg-warning/10 p-4"><p className="font-semibold">Unregistered tag: {unknown}</p><p className="mt-1 text-body-sm">Register this identifier before tracking a crate. This scan did not create inventory.</p><Button type="button" variant="secondary" className="mt-3" disabled={!write || busy} onClick={() => { setRegisterOpen(true); requestAnimationFrame(() => registerPanel.current?.scrollIntoView({ block: 'start' })) }}>Register this tag</Button></div>}
++    </Card>
++    {registerOpen && <div ref={registerPanel} className="scroll-mt-24"><Card className="p-5 md:p-6"><h2 className="text-h2 font-semibold">Register a crate</h2><p className="mt-1 text-body-sm text-fg-secondary">One crate, one product, one tag. Declaring contents does not add stock.</p><form onSubmit={(e: FormEvent) => { e.preventDefault(); void mutate({ action: 'register', tag, productId, quantity: Number(quantity), location: initialLocation }) }} className="mt-5 grid gap-4 sm:grid-cols-2">
++      <label className="flex flex-col gap-2 text-body-sm">Tag ID<div className="flex gap-2"><Input required aria-label="Register tag ID" value={tag} onChange={e => setTag(e.target.value)} maxLength={80} className={field} disabled={busy || !write} /><Button type="button" variant="secondary" className="h-12" disabled={busy || !write} onClick={() => setTag(`DEMO-${requestId().replace(/[^a-zA-Z0-9]/g, '').slice(-12).toUpperCase()}`)}>Generate demo ID</Button></div></label>
++      <label className="flex flex-col gap-2 text-body-sm">Product<select required aria-label="Crate product" value={productId} onChange={e => setProductId(e.target.value)} className={field} disabled={busy || !write}><option value="">Choose product</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
++      <label className="flex flex-col gap-2 text-body-sm">Quantity at registration<Input required aria-label="Declared quantity" type="number" min={0} max={1000000000} step={1} value={quantity} onChange={e => setQuantity(e.target.value)} className={field} disabled={busy || !write} /></label>
++      <label className="flex flex-col gap-2 text-body-sm">Initial location<Input required aria-label="Initial location" maxLength={80} value={initialLocation} onChange={e => setInitialLocation(e.target.value)} className={field} disabled={busy || !write} /></label>
++      <div className="flex flex-wrap gap-3 sm:col-span-2"><Button type="submit" className="h-12" disabled={!write || busy || !ready}>Save crate registration</Button><Button type="button" variant="secondary" className="h-12" disabled={busy} onClick={() => setRegisterOpen(false)}>Close form</Button></div>
++    </form>{!products.length && <p className="mt-3 text-body-sm text-warning">Add or import a product before registering a crate.</p>}</Card></div>}
++    <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">
++      <div className="flex min-w-0 flex-col gap-4">
++        <div className="flex flex-wrap gap-2" role="group" aria-label="Crate views">{(['locations', 'crates', 'activity'] as const).map(view => <Button type="button" key={view} variant={activeView === view ? 'primary' : 'secondary'} aria-pressed={activeView === view} onClick={() => setActiveView(view)}>{view === 'locations' ? 'By location' : view === 'crates' ? 'All crates' : 'Scan activity'}</Button>)}<Button type="button" variant="ghost" aria-label="Refresh crate records" disabled={busy} onClick={() => { void refresh().catch(e => setError(e.message)) }}><RefreshCw className="size-4" /></Button></div>
++        {activeView !== 'activity' && <Input aria-label="Search crates" placeholder="Search product, tag or location…" value={filter} onChange={e => setFilter(e.target.value)} className={field} />}
++        {!ready && <p role="status">Loading crate records…</p>}
++        {ready && !data.crates.length && activeView !== 'activity' && <Card className="p-6 text-center"><Box className="mx-auto mb-3 size-8 text-fg-secondary" /><h3 className="font-semibold">Your first crate starts here</h3><p className="mt-2 text-body-sm text-fg-secondary">Register an existing product and a demo tag, then try the reader. No sample stock is added automatically.</p></Card>}
++        {ready && data.crates.length > 0 && !visible.length && activeView !== 'activity' && <p className="text-body-sm text-fg-secondary">No matching crates.</p>}
++        {activeView === 'locations' && locations.filter(location => visible.some(c => c.location === location)).map(location => <Card key={location} className="overflow-hidden"><div className="flex items-center justify-between gap-3 border-b border-line bg-elevated/40 p-4"><h3 className="flex min-w-0 items-center gap-2 font-semibold"><MapPin className="size-4 shrink-0 text-accent-text" /><span className="break-words">{location}</span></h3><span className="shrink-0 text-caption text-fg-secondary">{data.crates.filter(c => c.location === location).length} recorded crates</span></div><div className="flex flex-col gap-2 p-3">{visible.filter(c => c.location === location).map(c => renderCrate(c))}</div></Card>)}
++        {activeView === 'crates' && visible.map(c => renderCrate(c))}
++        {activeView === 'activity' && <Card className="p-4"><h3 className="mb-3 font-semibold">Recent reader observations</h3><p className="mb-4 text-caption text-fg-secondary">Latest 100 observations. A read does not prove a transfer or a live quantity.</p>{!data.scans.length && <p className="text-body-sm">No observations yet. Try the demo reader.</p>}<ol className="flex flex-col gap-3">{data.scans.map(s => <li key={s.id} className="rounded-xl border border-line p-3 text-body-sm"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-elevated px-2 py-1 text-caption">{s.source === 'simulated' ? 'Simulated' : 'Entered ID'}</span><strong className="break-all">{s.tag}</strong>{!s.crate_id && <span className="text-warning">Unregistered</span>}</div><p className="mt-2">Reader location: {s.station}</p><p className="text-caption text-fg-secondary">{s.actor} · {formatDateTime(s.at)}</p></li>)}</ol></Card>}
++        <p className="text-caption text-fg-secondary">Locations show recorded crate placements, not sensor-verified occupancy or available rack capacity.</p>
++      </div>
++      <div ref={detail} tabIndex={-1} className="min-w-0 scroll-mt-24 outline-none" data-testid="crate-detail"><Card className="p-5 md:p-6">
++        {selected ? <>
++          <div className="flex items-center gap-2 text-caption uppercase tracking-wider text-accent-text"><Box className="size-4" />Crate record</div><h2 className="mt-3 text-h2 font-semibold">{selected.product_name}</h2><p className="mt-1 break-all text-caption text-fg-secondary">{selected.id} · {selected.tag}</p>
++          {lastInput && <p className="mt-3 text-caption text-fg-secondary">Latest input: {lastInput === 'simulated' ? 'Simulated RFID read' : 'Entered tag ID'} · hardware not verified</p>}
++          <div className="mt-5 rounded-xl border border-line bg-elevated/40 p-4"><p className="text-caption text-fg-secondary">Last recorded location</p><p className="mt-1 flex items-center gap-2 text-h2 font-semibold"><MapPin className="size-5 text-accent-text" />{selected.location}</p></div>
++          <dl className="mt-4 grid grid-cols-2 gap-2 text-body-sm"><dt className="text-fg-secondary">Quantity at registration</dt><dd className="text-right font-semibold">{selected.declared_quantity}</dd></dl><p className="mt-1 text-caption text-fg-secondary">Historical declaration, not the current remaining quantity.</p>
++          {selected.last_scan && <p className="mt-4 text-caption text-fg-secondary">Last observation: {selected.last_scan.station} · {selected.last_scan.source === 'simulated' ? 'simulated' : 'entered ID'} · {formatDateTime(selected.last_scan.at)}</p>}
++          {selected.location_review && <div role="status" className="mt-4 rounded-xl border border-warning/40 bg-warning/10 p-3 text-body-sm"><p className="flex items-center gap-2 font-semibold"><AlertTriangle className="size-4" />Location review needed</p><p className="mt-1">The latest observation says {selected.last_scan?.station}, while the record says {selected.location}. Verify the location before confirming a transfer. Simulated observations are demonstration data.</p></div>}
++          {write && <div className="mt-5"><Link href={`/count?product=${encodeURIComponent(selected.product_id)}`} className="flex min-h-12 items-center justify-center gap-2 rounded-xl bg-accent-fill px-4 py-3 text-body-sm font-semibold text-white">Check this product’s stock<ArrowRight className="size-4" /></Link><p className="mt-2 text-caption text-fg-secondary">Count across all relevant crates and locations. This opens the existing product-level count.</p></div>}
++          <div className="mt-6 border-t border-line pt-5"><h3 className="font-semibold">Record a whole-crate transfer</h3><p className="mt-1 text-body-sm text-fg-secondary">From {selected.location}. Confirm the destination after moving the crate.</p><form className="mt-4 flex flex-col gap-3" onSubmit={e => { e.preventDefault(); void mutate({ action: 'transfer', tag: selected.tag, revision: selected.revision, location: destination, note }) }}><label className="flex flex-col gap-2 text-body-sm">Destination<Input required aria-label="Transfer destination" value={destination} onChange={e => setDestination(e.target.value)} maxLength={80} className={field} disabled={!write || busy} /></label><label className="flex flex-col gap-2 text-body-sm">Note (optional)<Input aria-label="Transfer note" value={note} onChange={e => setNote(e.target.value)} maxLength={1000} className={field} disabled={!write || busy} /></label><Button type="submit" className="h-12" disabled={!write || busy}><CheckCircle2 className="size-4" />Confirm transfer</Button></form><p className="mt-2 text-caption text-fg-secondary">Transfers change recorded location, not shop stock totals.</p></div>
++          <h3 className="mt-6 font-semibold">Crate journey</h3><ol className="mt-4 flex flex-col gap-4 border-l border-line pl-4">{selected.events.map(event => <li key={event.id} className="relative text-body-sm"><span className="absolute -left-[21px] top-1 size-2 rounded-full bg-accent-fill" /><p className="font-medium">{event.action === 'register' ? `Registered at ${event.to_location}` : `${event.from_location} → ${event.to_location}`}</p><p className="mt-1 text-caption text-fg-secondary">{event.actor} · {formatDateTime(event.at)}</p>{event.note && <p className="mt-1 break-words">{event.note}</p>}</li>)}</ol>
++        </> : <div className="py-10 text-center"><Radio className="mx-auto size-10 text-accent-text" /><h2 className="mt-4 text-h2 font-semibold">Ready for a tag</h2><p className="mt-2 text-body-sm text-fg-secondary">Simulate a reader observation or select a crate to reveal its product, location and journey.</p></div>}
++      </Card></div>
++    </div>
++  </div>
++  function renderCrate(crate: TrackedCrate) {
++    return <button type="button" key={crate.id} disabled={busy} aria-label={`Open crate ${crate.tag}`} onClick={() => { setLastInput(null); openCrate(crate) }} className={cn('flex min-h-20 w-full items-center gap-3 rounded-xl border p-4 text-left transition-colors disabled:opacity-50', selectedTag === crate.tag ? 'border-accent-fill bg-accent-fill/10' : 'border-line bg-surface hover:bg-elevated')}><Box className="size-5 shrink-0 text-accent-text" /><span className="min-w-0 flex-1"><span className="block font-semibold">{crate.product_name}</span><span className="mt-1 block break-all text-caption text-fg-secondary">{crate.tag}</span><span className="mt-1 block text-caption text-fg-secondary">{crate.location}</span></span>{crate.location_review ? <AlertTriangle aria-label="Location review needed" className="size-4 shrink-0 text-warning" /> : <ArrowRight className="size-4 shrink-0 text-fg-secondary" />}</button>
++  }
++}
+--- a/artifacts/veracity/src/components/screens/count-view.tsx
++++ b/artifacts/veracity/src/components/screens/count-view.tsx
+@@ -1,12 +1,13 @@
+-import { useId, useMemo, useRef, useState, type FormEvent } from 'react'
++import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
+ import { Camera, CheckCircle2, ChevronDown, CircleMinus, CirclePlus, FileText, Loader2, Minus, Paperclip, Plus, Send, X } from 'lucide-react'
+-import { Link, useLocation } from 'wouter'
++import { Link, useLocation, useSearch } from 'wouter'
+ import { toast } from 'sonner'
+ import { useApp, useUnsavedWork } from '@/components/app/app-provider'
+ import { Button } from '@/components/ui/button'
+ import { Input } from '@/components/ui/input'
+ import { Label } from '@/components/ui/label'
+ import { Textarea } from '@/components/ui/textarea'
++import { ProductCrateLocations } from '@/components/veracity/product-crate-locations'
+ import { CaseAttachments } from '@/components/veracity/case-attachments'
+ import { NoDifferenceBadge } from '@/components/veracity/badges'
+ import { PhotoCountDialog } from '@/components/veracity/photo-count-dialog'
+@@ -22,6 +23,8 @@
+ 
+ export function CountView() {
+   const [, navigate] = useLocation()
++  const search = useSearch()
++  const appliedProduct = useRef('')
+   const { submitCount, createProduct, findOpenCase, role, products, summary, loading, error, refresh } = useApp()
+   const [mode, setMode] = useState<Mode>('count')
+   const [flow, setFlow] = useState<Flow>(null)
+@@ -47,6 +50,14 @@
+   const fileInput = useRef<HTMLInputElement>(null)
+   const ids = { product: useId(), counted: useId(), note: useId(), name: useId(), recorded: useId(), cost: useId(), newNote: useId() }
+   const product = products.find((item) => item.id === productId)
++  useEffect(() => {
++    const requested = new URLSearchParams(search).get('product')
++    if (!requested) { appliedProduct.current = ''; return }
++    if (requested !== appliedProduct.current && products.some(item => item.id === requested)) {
++      appliedProduct.current = requested
++      setProductId(requested); setCounted(''); setCountEntryMode('total'); setSubmitted(false)
++    }
++  }, [search, products])
+   useUnsavedWork(
+     (mode === 'count' && Boolean(productId || counted || note)) ||
+     (mode === 'product' && Boolean(newName || newRecorded || newCost || newNote)) ||
+@@ -275,6 +286,7 @@
+             </div>
+             {productMissing && <p id={`${ids.product}-error`} className="text-body-sm font-medium text-danger">Choose a product.</p>}
+           </div>
++          {product && <ProductCrateLocations key={product.id} productId={product.id} />}
+           <div role="group" aria-label="Quantity entry method" className="flex flex-wrap gap-2">
+             <Button type="button" size="sm" variant={countEntryMode === 'total' ? 'primary' : 'secondary'} aria-pressed={countEntryMode === 'total'} data-testid="count-mode-total" onClick={() => { setCountEntryMode('total'); setCounted(''); setSubmitted(false) }}>Total quantity</Button>
+             <Button type="button" size="sm" variant={countEntryMode === 'adjustment' ? 'primary' : 'secondary'} aria-pressed={countEntryMode === 'adjustment'} data-testid="count-mode-adjustment" onClick={() => { setCountEntryMode('adjustment'); setCounted(''); setSubmitted(false) }}>Adjustment (+/−)</Button>
+--- /dev/null
++++ b/artifacts/veracity/src/components/veracity/product-crate-locations.tsx
+@@ -0,0 +1,25 @@
++import { useEffect, useState } from 'react'
++import { Link } from 'wouter'
++import { Box, MapPin } from 'lucide-react'
++import { getCrates, type TrackedCrate } from '@/lib/crates'
++import { useApp } from '@/components/app/app-provider'
++
++export function ProductCrateLocations({ productId }: { productId: string }) {
++  const { role } = useApp()
++  const [crates, setCrates] = useState<TrackedCrate[]>([])
++  const [loading, setLoading] = useState(true)
++  const [error, setError] = useState('')
++  useEffect(() => {
++    const controller = new AbortController()
++    setCrates([]); setLoading(true); setError('')
++    void getCrates(controller.signal).then(state => {
++      if (!controller.signal.aborted) setCrates(state.crates.filter(c => c.product_id === productId))
++    }).catch(e => { if (!controller.signal.aborted) setError(e.message) }).finally(() => { if (!controller.signal.aborted) setLoading(false) })
++    return () => controller.abort()
++  }, [productId, role])
++  return <section className="rounded-xl border border-line bg-elevated/30 p-4" aria-label="Product crate locations">
++    <h3 className="flex items-center gap-2 font-semibold"><MapPin className="size-4 text-accent-text" />Where else is this product?</h3>
++    <p className="mt-2 text-body-sm text-fg-secondary">Check all relevant locations before submitting a product total. Crate declarations are not live quantities.</p>
++    {loading ? <p role="status" className="mt-3 text-body-sm">Loading recorded locations…</p> : error ? <p className="mt-3 text-body-sm text-warning">Crate locations unavailable. <Link href="/crates" className="underline">Open crate tracking</Link></p> : crates.length ? <ul className="mt-3 flex flex-col gap-2">{crates.map(crate => <li key={crate.id}><Link href={`/crates?tag=${encodeURIComponent(crate.tag)}`} className="flex min-h-11 items-center gap-2 rounded-lg border border-line px-3 py-2 text-body-sm hover:bg-elevated"><Box className="size-4 shrink-0 text-accent-text" /><span className="min-w-0 flex-1 break-words">{crate.location}<span className="block break-all text-caption text-fg-secondary">{crate.tag}</span></span><span className="text-caption text-fg-secondary">View crate</span></Link></li>)}</ul> : <p className="mt-3 text-body-sm text-fg-secondary">No crates registered for this product. <Link href="/crates" className="underline">Open crate tracking</Link></p>}
++  </section>
++}
+--- /dev/null
++++ b/artifacts/veracity/src/lib/crates.ts
+@@ -0,0 +1,13 @@
++export type CrateEvent = { id: number; action: string; from_location: string | null; to_location: string; actor: string; at: string; note: string }
++export type CrateScan = { id: number; tag?: string; crate_id?: string | null; source: 'simulated' | 'entered_id'; station: string; recorded_location: string | null; crate_revision: number | null; actor: string; at: string }
++export type TrackedCrate = { id: string; tag: string; product_id: string; product_name: string; declared_quantity: number; location: string; revision: number; events: CrateEvent[]; last_scan: CrateScan | null; location_review: boolean }
++export type CrateState = { crates: TrackedCrate[]; scans: CrateScan[] }
++export function requestId() {
++  return globalThis.crypto?.randomUUID?.() || `request-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
++}
++export async function getCrates(signal?: AbortSignal): Promise<CrateState> {
++  const response = await fetch('/api/backend/crates', { signal, cache: 'no-store' })
++  const data = await response.json()
++  if (!response.ok) throw new Error(data.error || 'Could not load crate tracking. Restart the updated backend and retry.')
++  return data
++}
+--- /dev/null
++++ b/tests/crate-reader.spec.ts
+@@ -0,0 +1,70 @@
++import { test, expect } from './isolated-test'
++import { loginDemo, changeDemoRole } from './demo-helpers'
++
++test('simulated crate reader, review, transfer and product counting work together', async ({ page, context, baseURL }) => {
++  test.setTimeout(120000)
++  await page.setViewportSize({ width: 1200, height: 950 })
++  const id = `crate-reader-${Date.now()}`
++  const tag = `DEMO-${id.toUpperCase()}`
++  await loginDemo(page, 'manager')
++  const imported = await context.request.post('/api/backend/imports', { headers: { Origin: baseURL! }, data: { kind: 'products', rows: [{ id, name: 'Reader Demo Bottles', recorded: 12 }] } })
++  expect(imported.ok()).toBeTruthy()
++  await page.goto('/crates')
++  const before = await (await context.request.get('/api/backend/crates')).json()
++  await expect(page.getByText('Simulated input · no hardware connected')).toBeVisible()
++  await page.getByRole('button', { name: 'Register crate', exact: true }).click()
++  await page.getByLabel('Register tag ID').fill(tag)
++  await page.getByLabel('Crate product').selectOption(id)
++  await page.getByLabel('Declared quantity', { exact: true }).fill('12')
++  await page.getByLabel('Initial location').fill('Stockroom')
++  await page.getByRole('button', { name: 'Save crate registration' }).click()
++  await expect(page.getByText('Crate registered. Scan its demo tag to retrieve the record.')).toBeVisible()
++  await page.getByLabel('Demo tag', { exact: true }).selectOption(tag)
++  await page.getByLabel('Reader location', { exact: true }).fill('Rack B')
++  await page.getByRole('button', { name: 'Simulate RFID scan' }).click()
++  const detail = page.getByTestId('crate-detail')
++  await expect(detail.getByRole('heading', { name: 'Reader Demo Bottles' })).toBeVisible()
++  await expect(detail.getByText('Location review needed', { exact: true })).toBeVisible()
++  let state = await (await context.request.get('/api/backend/crates')).json()
++  expect(state.crates.find((c: { tag: string }) => c.tag === tag).location).toBe('Stockroom')
++  await page.getByLabel('Transfer destination').fill('Rack B')
++  await page.getByLabel('Transfer note').fill('Whole crate moved for shelf replenishment')
++  await page.getByRole('button', { name: 'Confirm transfer', exact: true }).click()
++  await expect(detail.getByText('Stockroom → Rack B', { exact: true })).toBeVisible()
++  await expect(detail.getByText('Location review needed', { exact: true })).toHaveCount(0)
++  await page.screenshot({ path: 'generated-artifacts/rfid-desktop.png', fullPage: true })
++  await page.getByRole('link', { name: 'Check this product’s stock' }).click()
++  await expect(page.getByLabel('Product', { exact: true })).toHaveValue(id)
++  await expect(page.getByRole('region', { name: 'Product crate locations' }).getByRole('link', { name: /Rack B/ })).toBeVisible()
++  page.on('dialog', dialog => dialog.accept())
++  await page.getByRole('link', { name: /Rack B.*View crate/ }).click()
++  await expect(detail.getByRole('heading', { name: 'Reader Demo Bottles' })).toBeVisible()
++  await page.setViewportSize({ width: 390, height: 844 })
++  await page.getByLabel('Demo tag', { exact: true }).selectOption(tag)
++  await page.getByLabel('Reader location', { exact: true }).fill('Rack B')
++  await page.getByRole('button', { name: 'Simulate RFID scan' }).click()
++  await expect(detail.getByRole('heading', { name: 'Reader Demo Bottles' })).toBeVisible()
++  await expect(detail.getByText('Location review needed', { exact: true })).toHaveCount(0)
++  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy()
++  await page.screenshot({ path: 'generated-artifacts/rfid-mobile.png', fullPage: true })
++  const color = await page.getByLabel('Reader location', { exact: true }).evaluate(el => getComputedStyle(el).color)
++  expect(color).not.toBe('rgb(0, 0, 0)')
++  await page.getByLabel('Demo tag', { exact: true }).selectOption('DEMO-UNKNOWN-TAG')
++  await page.getByRole('button', { name: 'Simulate RFID scan' }).click()
++  await expect(page.getByText('Unregistered tag: DEMO-UNKNOWN-TAG', { exact: true })).toBeVisible()
++  await page.getByRole('button', { name: 'Scan activity', exact: true }).click()
++  await expect(page.getByText('Recent reader observations', { exact: true })).toBeVisible()
++  state = await (await context.request.get('/api/backend/crates')).json()
++  expect(state.crates).toHaveLength(before.crates.length + 1)
++  expect(state.scans).toHaveLength(before.scans.length + 3)
++  const inventory = await (await context.request.get('/api/backend/state')).json()
++  expect(inventory.products.find((p: { id: string }) => p.id === id).recorded).toBe(12)
++  await page.reload()
++  await expect(page.getByRole('button', { name: `Open crate ${tag}` })).toBeVisible()
++  await changeDemoRole(page, 'owner')
++  await page.goto('/crates')
++  await expect(page.getByRole('button', { name: 'Simulate RFID scan' })).toBeDisabled()
++  await expect(page.getByRole('button', { name: 'Register crate', exact: true })).toBeDisabled()
++  const denied = await context.request.post('/api/backend/crates', { headers: { Origin: baseURL! }, data: { action: 'scan', tag, source: 'simulated', station: 'Rack B', requestId: `owner-denied-${Date.now()}` } })
++  expect(denied.status()).toBe(403)
++})
+--- /dev/null
++++ b/tests/crate-photo-count.spec.ts
+@@ -0,0 +1,57 @@
++import { resolve } from 'node:path'
++import { test, expect } from './isolated-test'
++import { loginDemo } from './demo-helpers'
++
++test('a scanned crate opens the selected product and preserves photo count confirmation', async ({ page, context, baseURL }) => {
++  test.setTimeout(120000)
++  await page.setViewportSize({ width: 1024, height: 900 })
++  const id = `crate-photo-${Date.now()}`
++  const tag = `PHOTO-CRATE-${Date.now()}`
++  const headers = { Origin: baseURL! }
++  await loginDemo(page, 'manager')
++  expect((await context.request.post('/api/backend/imports', { headers, data: { kind: 'products', rows: [{ id, name: 'Photo Test Biscuits', recorded: 39 }] } })).ok()).toBeTruthy()
++  expect((await context.request.post('/api/backend/crates', { headers, data: { action: 'register', tag, productId: id, quantity: 39, location: 'Rack A', requestId: `register-photo-${Date.now()}` } })).ok()).toBeTruthy()
++  await page.goto('/crates')
++  await page.getByLabel('Demo tag', { exact: true }).selectOption(tag)
++  await page.getByLabel('Reader location', { exact: true }).fill('Rack A')
++  await page.getByRole('button', { name: 'Simulate RFID scan' }).click()
++  await expect(page.getByTestId('crate-detail').getByRole('heading', { name: 'Photo Test Biscuits' })).toBeVisible()
++  await page.getByRole('link', { name: 'Check this product’s stock' }).click()
++  await expect(page.getByLabel('Product', { exact: true })).toHaveValue(id)
++  await expect(page.getByRole('region', { name: 'Product crate locations' }).getByRole('link', { name: /Rack A/ })).toBeVisible()
++  await page.getByTestId('button-count-from-photo').click()
++  await expect(page.getByTestId('dialog-photo-count')).toBeVisible()
++  await page.getByTestId('input-photo-count').setInputFiles(resolve('docs/test-data/photo-count/snack-biscuits-39.jpg'))
++  const frame = page.getByTestId('photo-count-frame')
++  await expect(frame).toBeVisible()
++  const box = await frame.boundingBox()
++  if (!box) throw new Error('Photo frame missing')
++  await page.mouse.move(box.x + box.width * 65 / 1536, box.y + box.height * 120 / 1024)
++  await page.mouse.down()
++  await page.mouse.move(box.x + box.width * 232 / 1536, box.y + box.height * 265 / 1024, { steps: 8 })
++  await page.mouse.up()
++  await expect(page.getByTestId('button-photo-count-analyse')).toBeEnabled()
++  const resultPromise = page.waitForResponse(response => response.url().endsWith('/api/vision/count') && response.request().method() === 'POST')
++  await page.getByTestId('button-photo-count-analyse').click()
++  const response = await resultPromise
++  expect(response.ok()).toBeTruthy()
++  const result = await response.json()
++  expect(result.provider).toBe('built-in')
++  expect(result.count).toBeGreaterThan(0)
++  await expect(page.getByTestId('text-photo-count-result')).toContainText(`AI detected ${result.count}`)
++  await expect(page.getByTestId('button-photo-count-use')).toBeDisabled()
++  // Staff verification is deliberately separate from the image-processing suggestion.
++  await page.getByTestId('input-photo-count-confirmed').fill('39')
++  await page.getByTestId('checkbox-photo-covers').check()
++  await page.getByTestId('button-photo-count-use').click()
++  await expect(page.getByTestId('dialog-photo-count')).toHaveCount(0)
++  await expect(page.getByLabel('Counted quantity', { exact: true })).toHaveValue('39')
++  await expect(page.getByLabel('Note (optional)')).toHaveValue(/Counted from photo/)
++  const save = page.waitForResponse(r => r.url().endsWith('/api/backend/counts') && r.request().method() === 'POST')
++  await page.getByRole('button', { name: 'Submit count', exact: true }).click()
++  expect((await save).ok()).toBeTruthy()
++  await expect(page.getByTestId('card-count-complete')).toBeVisible()
++  const state = await (await context.request.get('/api/backend/state')).json()
++  expect(state.products.find((p: { id: string }) => p.id === id).recorded).toBe(39)
++  expect(state.summary.items.find((p: { productId: string }) => p.productId === id).counted).toBe(39)
++})
+--- a/tests/isolated-server.mjs
++++ b/tests/isolated-server.mjs
+@@ -87,6 +87,8 @@
+       VERACITY_E2E_TOKEN: token, VERACITY_DB: path.join(temp, 'test.sqlite3'),
+       VERACITY_STORAGE: 'local', VERACITY_LOCAL_UPLOAD_DIR: path.join(temp, 'evidence'),
+       APP_ORIGIN: url,
++      // Isolated browser fixtures use the local counter, never paid external inference.
++      RUNPOD_API_KEY: '', RUNPOD_ENDPOINT_ID: '', RUNPOD_API_BASE: '',
+     },
+   })
+   api.once('error', error => { console.error(error); void stop(1) })

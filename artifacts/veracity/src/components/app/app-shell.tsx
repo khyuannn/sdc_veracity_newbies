@@ -11,6 +11,7 @@ import type { Role } from '@/lib/types'
 const NAV: { href: string; label: string; icon: typeof Inbox; roles?: Role[] }[] = [
   { href: '/work', label: 'My work', icon: ListChecks, roles: ['staff'] },
   { href: '/count', label: 'Count', icon: ClipboardList, roles: ['staff', 'manager'] },
+  { href: '/crates', label: 'Crates', icon: ClipboardList },
   { href: '/inbox', label: 'Inbox', icon: Inbox },
   { href: '/history', label: 'History', icon: History },
   { href: '/decisions', label: 'Decisions', icon: BookOpenCheck, roles: ['owner'] },
@@ -91,7 +92,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       <nav
         aria-label="Main"
-        className="fixed inset-x-0 bottom-0 z-40 flex border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] md:hidden"
+        className="fixed inset-x-0 bottom-0 z-40 flex overflow-x-auto border-t border-line bg-surface pb-[env(safe-area-inset-bottom)] md:hidden"
       >
         {nav.map((item) => {
           const active = isActive(item.href)
@@ -101,7 +102,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               href={item.href}
               aria-current={active ? 'page' : undefined}
               className={cn(
-                'relative flex h-16 flex-1 flex-col items-center justify-center gap-1 text-caption font-medium',
+                'relative flex h-16 min-w-16 flex-1 flex-col items-center justify-center gap-1 text-caption font-medium',
                 active ? 'text-accent-text' : 'text-fg-secondary',
               )}
             >

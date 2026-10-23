@@ -1,0 +1,57 @@
+import { resolve } from 'node:path'
+import { test, expect } from './isolated-test'
+import { loginDemo } from './demo-helpers'
+
+test('a scanned crate opens the selected product and preserves photo count confirmation', async ({ page, context, baseURL }) => {
+  test.setTimeout(120000)
+  await page.setViewportSize({ width: 1024, height: 900 })
+  const id = `crate-photo-${Date.now()}`
+  const tag = `PHOTO-CRATE-${Date.now()}`
+  const headers = { Origin: baseURL! }
+  await loginDemo(page, 'manager')
+  expect((await context.request.post('/api/backend/imports', { headers, data: { kind: 'products', rows: [{ id, name: 'Photo Test Biscuits', recorded: 39 }] } })).ok()).toBeTruthy()
+  expect((await context.request.post('/api/backend/crates', { headers, data: { action: 'register', tag, productId: id, quantity: 39, location: 'Rack A', requestId: `register-photo-${Date.now()}` } })).ok()).toBeTruthy()
+  await page.goto('/crates')
+  await page.getByLabel('Demo tag', { exact: true }).selectOption(tag)
+  await page.getByLabel('Reader location', { exact: true }).fill('Rack A')
+  await page.getByRole('button', { name: 'Simulate RFID scan' }).click()
+  await expect(page.getByTestId('crate-detail').getByRole('heading', { name: 'Photo Test Biscuits' })).toBeVisible()
+  await page.getByRole('link', { name: 'Check this product’s stock' }).click()
+  await expect(page.getByLabel('Product', { exact: true })).toHaveValue(id)
+  await expect(page.getByRole('region', { name: 'Product crate locations' }).getByRole('link', { name: /Rack A/ })).toBeVisible()
+  await page.getByTestId('button-count-from-photo').click()
+  await expect(page.getByTestId('dialog-photo-count')).toBeVisible()
+  await page.getByTestId('input-photo-count').setInputFiles(resolve('docs/test-data/photo-count/snack-biscuits-39.jpg'))
+  const frame = page.getByTestId('photo-count-frame')
+  await expect(frame).toBeVisible()
+  const box = await frame.boundingBox()
+  if (!box) throw new Error('Photo frame missing')
+  await page.mouse.move(box.x + box.width * 65 / 1536, box.y + box.height * 120 / 1024)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width * 232 / 1536, box.y + box.height * 265 / 1024, { steps: 8 })
+  await page.mouse.up()
+  await expect(page.getByTestId('button-photo-count-analyse')).toBeEnabled()
+  const resultPromise = page.waitForResponse(response => response.url().endsWith('/api/vision/count') && response.request().method() === 'POST')
+  await page.getByTestId('button-photo-count-analyse').click()
+  const response = await resultPromise
+  expect(response.ok()).toBeTruthy()
+  const result = await response.json()
+  expect(result.provider).toBe('built-in')
+  expect(result.count).toBeGreaterThan(0)
+  await expect(page.getByTestId('text-photo-count-result')).toContainText(`AI detected ${result.count}`)
+  await expect(page.getByTestId('button-photo-count-use')).toBeDisabled()
+  // Staff verification is deliberately separate from the image-processing suggestion.
+  await page.getByTestId('input-photo-count-confirmed').fill('39')
+  await page.getByTestId('checkbox-photo-covers').check()
+  await page.getByTestId('button-photo-count-use').click()
+  await expect(page.getByTestId('dialog-photo-count')).toHaveCount(0)
+  await expect(page.getByLabel('Counted quantity', { exact: true })).toHaveValue('39')
+  await expect(page.getByLabel('Note (optional)')).toHaveValue(/Counted from photo/)
+  const save = page.waitForResponse(r => r.url().endsWith('/api/backend/counts') && r.request().method() === 'POST')
+  await page.getByRole('button', { name: 'Submit count', exact: true }).click()
+  expect((await save).ok()).toBeTruthy()
+  await expect(page.getByTestId('card-count-complete')).toBeVisible()
+  const state = await (await context.request.get('/api/backend/state')).json()
+  expect(state.products.find((p: { id: string }) => p.id === id).recorded).toBe(39)
+  expect(state.summary.items.find((p: { productId: string }) => p.productId === id).counted).toBe(39)
+})

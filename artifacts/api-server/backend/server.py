@@ -10,6 +10,7 @@ import secrets
 import sqlite3
 import sys
 import attachments
+import crates
 import reports
 from reporting import service as summary_reports
 from datetime import datetime, timezone
@@ -42,6 +43,7 @@ def init():
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,at TEXT NOT NULL,actor TEXT NOT NULL,action TEXT NOT NULL,case_id TEXT,detail TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY,case_id TEXT UNIQUE NOT NULL,product_id TEXT NOT NULL,before_qty INTEGER NOT NULL,after_qty INTEGER NOT NULL,detail TEXT NOT NULL);
         ''')
+        crates.init(db)
         attachments.init(db)
         reports.init(db)
         product_columns = {row['name'] for row in db.execute('PRAGMA table_info(products)')}
@@ -270,6 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                     bridge=os.environ.get('VERACITY_EVIDENCE_BRIDGE','')
                     if not bridge or not secrets.compare_digest(self.headers.get('X-Evidence-Bridge',''),bridge): raise APIError('Private evidence endpoint.',403)
                     result=attachments.route(db,user,path,self.command,b,sys.modules[__name__])
+                elif path==['crates']: result=crates.route(db,user,self.command,b,sys.modules[__name__])
                 elif self.command=='GET' and path==['state']: result=state(db,user)
                 elif reporting:
                     from urllib.parse import parse_qs, urlsplit

@@ -6,6 +6,7 @@ import { AppProvider, useApp } from '@/components/app/app-provider'
 import { AppShell } from '@/components/app/app-shell'
 import { Toaster } from '@/components/ui/sonner'
 import { CaseDetailView } from '@/components/screens/case-detail-view'
+import { CratesView } from '@/components/screens/crates-view'
 import { CountView } from '@/components/screens/count-view'
 import { HistoryView } from '@/components/screens/history-view'
 import { InboxFramesView } from '@/components/screens/inbox-frames-view'
@@ -59,6 +60,7 @@ function Router() {
         <Route path="/decisions"><Titled title="Decision overview · Veracity"><OwnerDecisionsView /></Titled></Route>
         <Route path="/inbox"><Titled title="Inbox · Veracity"><InboxView /></Titled></Route>
         <Route path="/inbox/frames"><Titled title="Inbox frames · Veracity"><InboxFramesView /></Titled></Route>
+        <Route path="/crates"><Titled title="Crate tracking · Veracity"><CratesView /></Titled></Route>
         <Route path="/count"><Titled title="New count · Veracity"><CountView /></Titled></Route>
         <Route path="/account"><RoleLanding /></Route>
         <Route path="/cases/:id" component={CasePage} />

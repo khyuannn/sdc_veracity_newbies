@@ -1,12 +1,13 @@
-import { useId, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Camera, CheckCircle2, ChevronDown, CircleMinus, CirclePlus, FileText, Loader2, Minus, Paperclip, Plus, Send, X } from 'lucide-react'
-import { Link, useLocation } from 'wouter'
+import { Link, useLocation, useSearch } from 'wouter'
 import { toast } from 'sonner'
 import { useApp, useUnsavedWork } from '@/components/app/app-provider'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { ProductCrateLocations } from '@/components/veracity/product-crate-locations'
 import { CaseAttachments } from '@/components/veracity/case-attachments'
 import { NoDifferenceBadge } from '@/components/veracity/badges'
 import { PhotoCountDialog } from '@/components/veracity/photo-count-dialog'
@@ -22,6 +23,8 @@ type CountEntryMode = 'total' | 'adjustment'
 
 export function CountView() {
   const [, navigate] = useLocation()
+  const search = useSearch()
+  const appliedProduct = useRef('')
   const { submitCount, createProduct, findOpenCase, role, products, summary, loading, error, refresh } = useApp()
   const [mode, setMode] = useState<Mode>('count')
   const [flow, setFlow] = useState<Flow>(null)
@@ -47,6 +50,14 @@ export function CountView() {
   const fileInput = useRef<HTMLInputElement>(null)
   const ids = { product: useId(), counted: useId(), note: useId(), name: useId(), recorded: useId(), cost: useId(), newNote: useId() }
   const product = products.find((item) => item.id === productId)
+  useEffect(() => {
+    const requested = new URLSearchParams(search).get('product')
+    if (!requested) { appliedProduct.current = ''; return }
+    if (requested !== appliedProduct.current && products.some(item => item.id === requested)) {
+      appliedProduct.current = requested
+      setProductId(requested); setCounted(''); setCountEntryMode('total'); setSubmitted(false)
+    }
+  }, [search, products])
   useUnsavedWork(
     (mode === 'count' && Boolean(productId || counted || note)) ||
     (mode === 'product' && Boolean(newName || newRecorded || newCost || newNote)) ||
@@ -275,6 +286,7 @@ export function CountView() {
             </div>
             {productMissing && <p id={`${ids.product}-error`} className="text-body-sm font-medium text-danger">Choose a product.</p>}
           </div>
+          {product && <ProductCrateLocations key={product.id} productId={product.id} />}
           <div role="group" aria-label="Quantity entry method" className="flex flex-wrap gap-2">
             <Button type="button" size="sm" variant={countEntryMode === 'total' ? 'primary' : 'secondary'} aria-pressed={countEntryMode === 'total'} data-testid="count-mode-total" onClick={() => { setCountEntryMode('total'); setCounted(''); setSubmitted(false) }}>Total quantity</Button>
             <Button type="button" size="sm" variant={countEntryMode === 'adjustment' ? 'primary' : 'secondary'} aria-pressed={countEntryMode === 'adjustment'} data-testid="count-mode-adjustment" onClick={() => { setCountEntryMode('adjustment'); setCounted(''); setSubmitted(false) }}>Adjustment (+/−)</Button>

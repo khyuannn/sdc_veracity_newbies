@@ -87,6 +87,8 @@ try {
       VERACITY_E2E_TOKEN: token, VERACITY_DB: path.join(temp, 'test.sqlite3'),
       VERACITY_STORAGE: 'local', VERACITY_LOCAL_UPLOAD_DIR: path.join(temp, 'evidence'),
       APP_ORIGIN: url,
+      // Isolated browser fixtures use the local counter, never paid external inference.
+      RUNPOD_API_KEY: '', RUNPOD_ENDPOINT_ID: '', RUNPOD_API_BASE: '',
     },
   })
   api.once('error', error => { console.error(error); void stop(1) })

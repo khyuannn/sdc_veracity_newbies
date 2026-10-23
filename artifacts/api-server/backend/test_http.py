@@ -118,4 +118,22 @@ class HTTPTests(unittest.TestCase):
             self.call('products',{'name':'Owner product','recorded':1})
         self.assertEqual(forbidden.exception.code,403)
 
+    def test_crate_scan_http_session_permissions_and_persistence(self):
+        with self.assertRaises(urllib.error.HTTPError) as error:self.call('crates')
+        self.assertEqual(error.exception.code,401)
+        self.call('session',{'role':'manager'})
+        self.call('imports',{'kind':'products','rows':[{'id':'CR-P','name':'Crate Product','recorded':12}]})
+        self.call('crates',{'action':'register','tag':'HTTP-TAG-001','productId':'CR-P','quantity':12,'location':'Stockroom','requestId':'http-register-000001'})
+        self.call('session',{'role':'staff'})
+        body={'action':'scan','tag':'HTTP-TAG-001','source':'simulated','station':'Rack A','requestId':'http-scan-000000001'}
+        self.call('crates',body);state=self.call('crates',body)
+        self.assertEqual(len(state['scans']),1)
+        self.assertTrue(state['crates'][0]['location_review'])
+        self.assertEqual(state['crates'][0]['location'],'Stockroom')
+        self.assertEqual(self.call('state')['products'][0]['recorded'],12)
+        self.call('session',{'role':'owner'})
+        self.assertEqual(len(self.call('crates')['scans']),1)
+        with self.assertRaises(urllib.error.HTTPError) as error:self.call('crates',body)
+        self.assertEqual(error.exception.code,403)
+
 if __name__=='__main__':unittest.main()
