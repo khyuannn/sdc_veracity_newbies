@@ -22,9 +22,11 @@ function Brand() {
   const { role } = useApp()
   return (
     <Link href={roleHome(role)} aria-label="Veracity home" className="flex items-center gap-3 rounded-[12px]">
-      <span className="flex size-10 items-center justify-center rounded-[12px] bg-accent-fill text-white">
-        <ShieldCheck className="size-5" aria-hidden="true" />
-      </span>
+      <img
+        src={`${import.meta.env.BASE_URL}veracity-icon.png`}
+        alt=""
+        className="size-10 shrink-0 rounded-[12px] object-contain"
+      />
       <span className="flex flex-col">
         <span className="text-h3 font-semibold">Veracity</span>
         <span className="text-caption text-fg-tertiary">Inventory · Orbyte</span>
