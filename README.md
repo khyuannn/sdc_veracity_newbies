@@ -25,7 +25,7 @@ Veracity helps SME retailers locate stock, verify physical quantities and invest
 | Resource | Link |
 | --- | --- |
 | GitHub Repository | https://github.com/khyuannn/sdc_veracity_newbies |
-| Live Demo | https://sdcveracitynewbies-lowzh51.replit.app/login |
+| Live Demo | [https://sdcveracitynewbies-lowzh51.replit.app/login](https://sdcveracitynewbies-lowzh51.replit.app/login) |
 | RunPod Endpoint | https://api.runpod.ai/v2/6ffcqmfzokm838 |
 | Slide Deck | [View slide deck](submission/SDC2026_newbies_SlideDeck.pdf) |
 | Demo Video | https://youtu.be/CzHVWAjZkkE |
