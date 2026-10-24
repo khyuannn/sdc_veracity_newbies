@@ -41,6 +41,10 @@ export function PhotoCountDialog({ open, onOpenChange, productName, onUse }: {
   const [photo, setPhoto] = useState<Photo | null>(null)
   const [example, setExample] = useState<Box | null>(null)
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null)
+  // The example as of the last pointer-up. Hints follow this, not the box being
+  // dragged: a hint changing length mid-drag moves the centred dialog under the
+  // finger and shifts the box (seen on phones).
+  const [settled, setSettled] = useState<Box | null>(null)
   const [result, setResult] = useState<CountResult | null>(null)
   const [excluded, setExcluded] = useState<Set<number>>(new Set())
   const [confirmed, setConfirmed] = useState('')
@@ -51,7 +55,7 @@ export function PhotoCountDialog({ open, onOpenChange, productName, onUse }: {
   const frame = useRef<HTMLDivElement>(null)
 
   const reset = () => {
-    setPhoto(null); setExample(null); setDrag(null); setResult(null); setExcluded(new Set())
+    setPhoto(null); setExample(null); setSettled(null); setDrag(null); setResult(null); setExcluded(new Set())
     setConfirmed(''); setCovers(false); setError('')
     if (fileInput.current) fileInput.current.value = ''
   }
@@ -85,7 +89,9 @@ export function PhotoCountDialog({ open, onOpenChange, productName, onUse }: {
   }
   const onUp = () => {
     setDrag(null)
-    if (example && (example.width < 10 || example.height < 10)) setExample(null)
+    const kept = example && example.width >= 10 && example.height >= 10 ? example : null
+    if (!kept) setExample(null)
+    setSettled(kept)
   }
 
   const analyse = async () => {
@@ -110,7 +116,9 @@ export function PhotoCountDialog({ open, onOpenChange, productName, onUse }: {
     if (result) setConfirmed(String(result.count - next.size))
   }
 
-  const exampleShare = photo && example ? (example.width * example.height) / (photo.width * photo.height) : 0
+  const shareOf = (box: Box | null) => photo && box ? (box.width * box.height) / (photo.width * photo.height) : 0
+  const exampleShare = shareOf(example)
+  const settledShare = shareOf(settled)
   const detected = result ? result.count - excluded.size : 0
   const confirmedNum = confirmed === '' ? NaN : Number(confirmed)
   const confirmedValid = Number.isInteger(confirmedNum) && confirmedNum >= 0 && confirmedNum <= 1_000_000_000
@@ -141,7 +149,9 @@ export function PhotoCountDialog({ open, onOpenChange, productName, onUse }: {
         {photo && (
           <div
             ref={frame}
-            className={cn('relative w-full touch-none select-none overflow-hidden rounded-[12px] border border-line', !result && 'cursor-crosshair')}
+            // overflow-clip, not overflow-hidden: in the dialog's grid a hidden-overflow
+            // item may shrink to 0 height, squashing the photo on short (phone) screens.
+            className={cn('relative w-full touch-none select-none overflow-clip rounded-[12px] border border-line', !result && 'cursor-crosshair')}
             onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}
             data-testid="photo-count-frame"
           >
@@ -159,11 +169,11 @@ export function PhotoCountDialog({ open, onOpenChange, productName, onUse }: {
         )}
 
         {photo && !result && (
-          exampleShare > TOO_BIG
+          settledShare > TOO_BIG
             ? <p role="alert" className="text-body-sm font-medium text-danger" data-testid="text-photo-count-box-too-big">This box covers most of the photo. Redraw it around just one item (for example, one pack), not the whole counting area.</p>
-            : exampleShare > LOOKS_BIG
+            : settledShare > LOOKS_BIG
               ? <p role="status" className="text-body-sm font-medium text-warning">This box is large. Make sure it contains exactly one item, not several.</p>
-              : <p className="text-body-sm text-fg-secondary">{example ? 'Example selected. Redraw to change it.' : 'Drag a box around one whole item in the photo, not the whole area.'}</p>
+              : <p className="text-body-sm text-fg-secondary">{settled ? 'Example selected. Redraw to change it.' : 'Drag a box around one whole item in the photo, not the whole area.'}</p>
         )}
 
         {result && (
@@ -202,7 +212,7 @@ export function PhotoCountDialog({ open, onOpenChange, productName, onUse }: {
 
         <DialogFooter className="flex-wrap gap-3">
           {photo && <Button type="button" variant="secondary" className="min-h-11" disabled={busy} onClick={() => fileInput.current?.click()}>Change photo</Button>}
-          {result && <Button type="button" variant="secondary" className="min-h-11" onClick={() => { setResult(null); setExample(null); setExcluded(new Set()) }}>Pick another example</Button>}
+          {result && <Button type="button" variant="secondary" className="min-h-11" onClick={() => { setResult(null); setExample(null); setSettled(null); setExcluded(new Set()) }}>Pick another example</Button>}
           {!result
             ? <Button type="button" className="min-h-11" disabled={!photo || !example || busy || exampleShare > TOO_BIG} onClick={() => void analyse()} data-testid="button-photo-count-analyse">
                 {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : <ScanSearch aria-hidden="true" />}{busy ? 'Counting… (the first count can take a minute)' : 'Count items'}

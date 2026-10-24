@@ -121,8 +121,9 @@ back to local disk.
 
 An **override** records one explicit adjustment to the counted balance and marks
 the remaining evidence unresolved, so it can never be applied again later.
-**Refresh evidence & reassess** appends a new assessment (old versions are kept);
-an older assessment can no longer be approved. Closed cases are read-only.
+**Refresh evidence & reassess** (Manager, or the Staff member who created the case)
+appends a new assessment (old versions are kept); an older assessment can no
+longer be approved. Closed cases are read-only.
 
 **Summary** page (Manager, Owner): Daily, Weekly, Monthly or Yearly, all in
 **Asia/Kuala_Lumpur** time with Monday–Sunday weeks. Current periods update while
@@ -149,7 +150,7 @@ The line under the result shows what counted it, for example
 | --- | --- |
 | `built-in counter · template matching` | No RunPod configured. Finds look-alikes of the example (Node + `sharp`). Good for neat rows of identical items, poor for mixed flavours. |
 | `owlv2 (name, cuda)` | RunPod GPU worker found items by **product name** (OWLv2 open-vocabulary detector); the example sets size and shape. Best accuracy. |
-| `owlv2 (example, …)` | The product name found nothing, so it matched the example's look only. Usually the **wrong product is selected**; the dialog warns about this. |
+| `owlv2 (example, …)` | The product name found nothing, so it matched the example's look only, and the dialog shows a yellow "check the right product is selected" warning. This only catches a very different product: a wrong but similar-looking product (or a vague name) is usually still "found" by name with **no warning**, so staff must check the product before confirming. |
 | `… cpu` | Running on a CPU endpoint: slow and may time out. Use a GPU endpoint. |
 
 Measured on two test photos: built-in 39/39 packs but 3/13 mixed cans; OWLv2
@@ -209,11 +210,13 @@ Synthetic products A/B/C with `csv-records/` (import) and `upload-documents/`
 
 1. Import `products.csv` and `movements.csv`. Submit a count of **33** for
    **Snack Biscuits B** (recorded 40) after 20 Oct 2026 08:30 MYT.
-   Expected: shortage 7, explained 3, **4 unexplained**; normal approval blocked.
+   Expected: difference −7; the case says *"Unposted sales of 3 units… 4 units
+   below expected"* and *"Approval is unavailable: 4 units are unexplained."*
 2. As Manager or the Staff creator, upload the three files to the open case.
    They stay after refresh; numbers and stock do not change.
 3. Optional: import `additional-evidence.csv` (structured DR004 damage −4), then
-   **Refresh evidence & reassess**: explained 7, unexplained 0, old assessment kept.
+   **Refresh evidence & reassess**: the new assessment shows net movements of −7
+   matching the count (*Pending approval*); the old assessment is kept.
    Approve once → stock 33; approving again changes nothing.
 
 On a shared instance let one person do the mutating steps, and never delete a
@@ -231,7 +234,7 @@ pnpm test                 # Python backend + API node tests
 pnpm run typecheck
 node --test artifacts/veracity/tests/evidence-upload.test.mjs
 pnpm exec playwright install chromium   # once, outside Replit
-pnpm test:e2e             # 12 browser tests
+pnpm test:e2e             # isolated browser tests
 ```
 
 `pnpm test:e2e` starts its own loopback frontend, API, Python backend, temporary
