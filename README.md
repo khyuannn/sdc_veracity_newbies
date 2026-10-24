@@ -382,7 +382,7 @@ Browser tests start a dedicated loopback-only gateway, temporary SQLite database
 
 Earlier merge validation passed **74 Python tests, 17 Node tests and three targeted browser tests**, plus TypeScript checks and frontend/API builds. These are results for that tested revision, not a guarantee about later commits or real-world detection accuracy. Actual Windows and Android hardware behaviour must be verified on those devices.
 
-## How We Use Replit — Required
+## How We Use Replit 
 
 - **Hosting:** the published prototype is shared through the Live Demo link above.
 - **Application runtime:** the Project workflow starts the React/Vite frontend and Express gateway; the gateway starts the private Python service.
@@ -394,7 +394,7 @@ Earlier merge validation passed **74 Python tests, 17 Node tests and three targe
 
 Evidence-file storage and SQLite database storage are separate. App Storage configuration alone does not guarantee durable SQLite persistence across deployment lifecycle events; persistent database deployment and backup arrangements must be verified before operational use.
 
-## How We Use RunPod — Required
+## How We Use RunPod 
 
 - **GPU workload:** the configured Serverless worker performs photo-based object detection with pretrained OWLv2.
 - **Handler:** `artifacts/api-server/detector/runpod_handler.py`.
@@ -476,7 +476,7 @@ The roles below summarize visible repository contributions and the project work 
 
 | Name | Contribution-based Role | GitHub |
 | --- | --- | --- |
-| **KOH HUI YUAN** | Team Lead; product direction, crate-tracking integration, UI improvements and pitch coordination | [@khyuannn](https://github.com/khyuannn) |
+| **Koh Hui Yuan** | Team Lead; product direction, crate-tracking integration, UI improvements and pitch coordination | [@khyuannn](https://github.com/khyuannn) |
 | **Chew Zhi Foong** | Evidence-upload/backend integration and local-development merge support | [@Zhifoong0822](https://github.com/Zhifoong0822) |
 | **Derrick Lee Jia Qian** | Frontend count-entry workflow and quantity-input improvements | [@Derrick-L16](https://github.com/Derrick-L16) |
 | **Low Zhan Hui** | Full-stack integration; photo counting, RunPod worker, reporting and development setup | [@Lowzh5](https://github.com/Lowzh5) |
