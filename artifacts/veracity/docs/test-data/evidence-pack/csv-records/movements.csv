@@ -1,7 +1,0 @@
-id,product_id,kind,quantity,occurred_at,conflict_ref
-TX001,A,Sale,-3,2026-10-20T08:00:00+08:00,
-TX002,A,Sale,-2,2026-10-20T08:01:00+08:00,
-TX003,A,Sale,-2,2026-10-20T08:02:00+08:00,
-TX010,B,Sale,-3,2026-10-20T08:00:00+08:00,
-TX020,C,Delivery,3,2026-10-20T08:00:00+08:00,Verify supplier delivery versus return
-TX021,C,Supplier return,-3,2026-10-20T08:01:00+08:00,Verify supplier delivery versus return
