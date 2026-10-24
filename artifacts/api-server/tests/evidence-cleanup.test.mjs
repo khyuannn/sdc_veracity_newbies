@@ -81,7 +81,8 @@ test("offline worker dry-run, exact confirmation and durable delete log using fa
     writeFileSync(fixture, JSON.stringify({ [key]: old, [protectedKey]: old,
       [recentKey]: { ...old, updated: new Date().toISOString() } }));
     const worker = fileURLToPath(new URL("../tools/evidence-cleanup.mjs", import.meta.url));
-    const loader = fileURLToPath(new URL("./fixtures/evidence-cleanup-loader.mjs", import.meta.url));
+    // A file:// URL, not a path: --experimental-loader rejects bare Windows paths (C:\...).
+    const loader = new URL("./fixtures/evidence-cleanup-loader.mjs", import.meta.url).href;
     const run = input => spawnSync(process.execPath, ["--experimental-loader", loader, worker], {
       input: JSON.stringify(input), encoding: "utf8", env: {
         ...process.env, VERACITY_STORAGE: "replit", CLEANUP_FIXTURE: fixture,

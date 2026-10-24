@@ -1,6 +1,5 @@
 import { AlertCircle, Inbox, Lock, RotateCw, type LucideIcon } from 'lucide-react'
-import { Link } from 'wouter'
-import { Button, buttonVariants } from '@/components/ui/button'
+import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
 export function Card({ className, ...props }: React.ComponentProps<'section'>) {
@@ -9,31 +8,6 @@ export function Card({ className, ...props }: React.ComponentProps<'section'>) {
       className={cn('rounded-[20px] border border-line bg-surface p-4 md:p-5', className)}
       {...props}
     />
-  )
-}
-
-export function IconButton({
-  label,
-  icon: Icon,
-  href,
-  className,
-  ...props
-}: { label: string; icon: LucideIcon; href?: string; className?: string } & Omit<
-  React.ComponentProps<typeof Button>,
-  'children'
->) {
-  const classes = cn(buttonVariants({ variant: 'secondary', size: 'icon' }), className)
-  if (href) {
-    return (
-      <Link href={href} aria-label={label} className={classes}>
-        <Icon className="size-5" aria-hidden="true" />
-      </Link>
-    )
-  }
-  return (
-    <Button aria-label={label} variant="secondary" size="icon" className={className} {...props}>
-      <Icon className="size-5" aria-hidden="true" />
-    </Button>
   )
 }
 
