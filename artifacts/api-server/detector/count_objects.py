@@ -5,7 +5,8 @@ found by normalised template matching at a few scales. No training data is
 needed. The result is only a suggestion: staff confirm the quantity in the app.
 
 This is the RunPod worker's copy of the method in
-src/lib/photo-count.ts (which the app uses when RunPod is not configured).
+src/features/photo-count/photo-count.ts (which the app uses when RunPod is
+not configured).
 It can also be run locally for testing: JSON on stdin, JSON on stdout.
 """
 import base64

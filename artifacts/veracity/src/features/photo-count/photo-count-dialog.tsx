@@ -174,6 +174,11 @@ export function PhotoCountDialog({ open, onOpenChange, productName, onUse }: {
             <p className="text-caption text-fg-tertiary" data-testid="text-photo-count-model">
               Counted by {result.provider === 'runpod' ? 'RunPod' : 'the built-in counter'}{result.model ? ` · ${result.model}` : ''}
             </p>
+            {result.model?.includes('(example') && (
+              <p className="text-body-sm font-medium text-warning" data-testid="text-photo-count-name-mismatch">
+                The AI could not find “{productName}” by name in this photo, so it counted by the example’s look only. Check that the right product is selected.
+              </p>
+            )}
             {result.count <= 1 && (
               <p className="text-body-sm font-medium text-warning" data-testid="text-photo-count-one">
                 Only the example was found. If the box held more than one item, choose <strong>Pick another example</strong> and box a single item.

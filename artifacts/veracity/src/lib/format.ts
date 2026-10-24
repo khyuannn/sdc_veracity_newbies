@@ -14,7 +14,3 @@ export function formatSigned(n: number) {
   if (n < 0) return `\u2212${Math.abs(n)}`
   return '0'
 }
-
-export function nowIso() {
-  return new Date().toISOString()
-}

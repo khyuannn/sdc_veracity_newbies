@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import sharp from "sharp";
-import { countPhotoObjects, PhotoCountError } from "../src/lib/photo-count.ts";
+import { countPhotoObjects, PhotoCountError } from "../src/features/photo-count/photo-count.ts";
 
 const photo = readFileSync(new URL("../../../docs/test-data/photo-count/snack-biscuits-39.jpg", import.meta.url));
 

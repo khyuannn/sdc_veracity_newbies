@@ -1,8 +1,8 @@
 import { Router, type IRouter } from "express";
-import { getBackendUrl } from "../lib/python-backend";
-import { isTrustedOrigin } from "../lib/trusted-origin";
-import { countPhotoObjects, PhotoCountError, type Box } from "../lib/photo-count";
-import { countOnRunpod, runpodConfigured } from "../lib/runpod-count";
+import { getBackendUrl } from "../../lib/python-backend";
+import { isTrustedOrigin } from "../../lib/trusted-origin";
+import { countPhotoObjects, PhotoCountError, type Box } from "./photo-count";
+import { countOnRunpod, runpodConfigured } from "./runpod-count";
 
 const router: IRouter = Router();
 const MAX_IMAGE_BYTES = 1_400_000; // The app downsizes photos before sending them.

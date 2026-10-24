@@ -1,3 +1,0 @@
-File access test successful.
-Replit Agent created this file to confirm it can make changes to this project.
-This file does not affect how the app works and can be deleted at any time.

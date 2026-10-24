@@ -7,7 +7,7 @@ import { createRequire } from 'node:module'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -102,7 +102,8 @@ try {
     await new Promise(resolve => setTimeout(resolve, 100))
   }
   if (!ready) throw new Error('Isolated API failed to start')
-  const { createServer: createViteServer } = await import(requireWeb.resolve('vite'))
+  // import() needs a file:// URL; a bare Windows path (C:\...) is rejected.
+  const { createServer: createViteServer } = await import(pathToFileURL(requireWeb.resolve('vite')).href)
   // Load the existing frontend config, but no public port and no normal API proxy.
   process.env.BASE_PATH = '/'
   process.env.NODE_ENV = 'development'
