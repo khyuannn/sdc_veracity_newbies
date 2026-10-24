@@ -25,7 +25,7 @@ export function CountView() {
   const [, navigate] = useLocation()
   const search = useSearch()
   const appliedProduct = useRef('')
-  const { submitCount, createProduct, findOpenCase, role, products, summary, loading, error, refresh } = useApp()
+  const { submitCount, createProduct, findOpenCase, getCase, role, products, summary, loading, error, refresh } = useApp()
   const [mode, setMode] = useState<Mode>('count')
   const [flow, setFlow] = useState<Flow>(null)
   const [productId, setProductId] = useState('')
@@ -223,7 +223,8 @@ export function CountView() {
             <div className="flex flex-col gap-4">
               <div className="flex items-center justify-between"><div><h2 className="text-h2 font-semibold">Upload evidence</h2><p className="text-body-sm text-fg-secondary">Step 2 of 2 · Case {newCase.id}</p></div></div>
               <CaseAttachments
-                stockCase={newCase}
+                // The refreshed case from app state, so new uploads appear in the list.
+                stockCase={getCase(newCase.id) ?? newCase}
                 viewed={newCase.versions[newCase.versions.length - 1]}
                 helperText="Add a photo or report that explains the difference."
                 completionMode
